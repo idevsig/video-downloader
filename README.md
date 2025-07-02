@@ -35,10 +35,7 @@
 2. 启动本服务
     ```bash
     uv sync
-    uv run video-downloader
-
-    # 支持队列
-    uv run video-downloader
+    uv run fetcher
     ```
 3. 使用客户端，发布消息（`JSON`）到主题 `video/download/request`，格式如下：   
 建议 `QOS` 为 `0`, `retain` 为 `false`。若 `retain` 为 `true`，则消息会被保留，直到有新的消息发布到相同的主题。会导致重启服务器后，重复下载相同的文件。
@@ -67,7 +64,7 @@
   当服务器端下载 M3U8 视频，且合并为 MP4 视频后，本地客户端同步下载至本地。
     ```bash
     uv sync
-    uv run video-puller    
+    uv run puller    
     ```
 
 ### 基于 Docker 部署
@@ -90,10 +87,10 @@
     **客户端**
     ```bash
      # 使用外置的 aria2 下载视频
-     docker run -e ARIA2_RPC_HOST=http://192.168.1.138 -e ARIA2_DOWNLOAD_DIR=test_down -it video-downloader:local video-puller --qos-level 2 --aria2-rpc-token your-secret-key --aria2-rpc-enable 1 --aria2-rpc-download-dir test_download
+     docker run -e ARIA2_RPC_HOST=http://192.168.1.138 -e ARIA2_DOWNLOAD_DIR=test_down -it video-downloader:local puller --qos-level 2 --aria2-rpc-token your-secret-key --aria2-rpc-enable 1 --aria2-rpc-download-dir test_download
     
      # 挂载下载目录
-     docker run -e ARIA2_DOWNLOAD_DIR=test_down -e QOS_LEVEL=2 -v $(pwd)/aria2down:/app/test_down -it video-downloader:local video-puller
+     docker run -e ARIA2_DOWNLOAD_DIR=test_down -e QOS_LEVEL=2 -v $(pwd)/aria2down:/app/test_down -it video-downloader:local puller
 
      # aria2c rpc server
      aria2c --enable-rpc --rpc-listen-all=true --rpc-secret=your-secret-key --dir=/downloads
@@ -147,13 +144,13 @@ ARIA2_DOWNLOAD_DIR = "aria_downloads"
 
 命令行参数:
 ```bash
-uv run video-downloader --mqtt-broker mqtt.example.com --mqtt-port 1884
+uv run fetcher --mqtt-broker mqtt.example.com --mqtt-port 1884
 ```
 
 ## 运行
 
 ```bash
-uv run video-downloader
+uv run fetcher
 ```
 
 ```mermaid

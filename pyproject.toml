@@ -11,9 +11,8 @@ dependencies = [
 ]
 
 [project.scripts]
-video-downloader = "downloader.downloader:main"
-video-downloaders = "downloader.downloaders:main"
-video-puller = "downloader.puller:main"
+fetcher = "video.fetcher:main"
+puller = "video.puller:main"
 
 [tool.uv]
 package = true
