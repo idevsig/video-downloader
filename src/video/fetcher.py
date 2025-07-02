@@ -1,15 +1,14 @@
 import paho.mqtt.client as mqtt
 import json
-import re
 import subprocess
 import os
-from urllib.parse import urlparse
 import time
 import logging
 import queue
 import threading
 from .logger import setup_logging
 from .config import load_config
+from .utils import extract_url_from_text, is_valid_m3u8_url
 
 """
 Download videos to a cloud server with sequential MQTT message processing.
@@ -36,21 +35,6 @@ def on_message(client, userdata, msg):
     except Exception as e:
         logging.error(f"Error queuing message: {str(e)}")
 
-def extract_url_from_text(text):
-    """Extract URL from text."""
-    url_pattern = re.compile(
-        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    )
-    match = url_pattern.search(text)
-    return match.group(0) if match else None
-
-def is_valid_m3u8_url(url):
-    """Validate if URL is a valid M3U8 URL."""
-    try:
-        url_obj = urlparse(url)
-        return all([url_obj.scheme, url_obj.netloc]) and url_obj.path.endswith('.m3u8')
-    except ValueError:
-        return False
 
 def download_video(url, output_path):
     """Download video using m3u8-downloader."""
@@ -92,6 +76,10 @@ def process_message(client, config, msg, receive_time):
         
         if not url:
             logging.warning("No valid URL found in the message")
+            return
+        
+        if not is_valid_m3u8_url(url):
+            logging.warning("No valid M3U8 URL found in the message")
             return
 
         logging.info(f"Extracted URL: {url}, Name: {name}")
@@ -169,6 +157,8 @@ def on_log(client, userdata, paho_log_level, messages):
         print(messages)
 
 def main():
+    service_name = "fetcher"
+    
     # Load configuration
     config = load_config()
     
@@ -179,7 +169,7 @@ def main():
     KEEPALIVE = config['KEEPALIVE']
     MQTT_TOPIC_SUBSCRIBE = config['MQTT_TOPIC_SUBSCRIBE']
     MQTT_TOPIC_PUBLISH = config['MQTT_TOPIC_PUBLISH']
-    suffix = time.strftime("_downloader_%y%m%d%H%M%S", time.localtime())
+    suffix = time.strftime(f"_{service_name}_%y%m%d%H%M%S", time.localtime())
     MQTT_CLIENT_ID = config['MQTT_CLIENT_ID'] + suffix
     DOWNLOAD_DIR = config['DOWNLOAD_DIR']
     DOWNLOAD_PREFIX_URL = config['DOWNLOAD_PREFIX_URL']
@@ -191,7 +181,7 @@ def main():
         os.makedirs(DOWNLOAD_DIR)
 
     # Setup logging
-    setup_logging("downloaders")
+    setup_logging("fetcher")
 
     # Print configuration
     print("::Configuration loaded::")
@@ -257,5 +247,5 @@ def main():
         logging.info("MQTT client stopped.")
 
 if __name__ == "__main__":
-    print("Starting MQTT video downloader client...")
+    print("Starting MQTT video fetcher client...")
     main()

@@ -1,13 +1,14 @@
 import aria2p
 import paho.mqtt.client as mqtt
 import json
-import re
 import subprocess
-from urllib.parse import urlparse
 import time
 import logging
+import queue
+import threading
 from .logger import setup_logging
 from .config import load_config
+from .utils import extract_url_from_text, is_valid_mp4_url
 
 """
 下载到本地客户端
@@ -18,7 +19,7 @@ def on_connect(client, userdata, flags, rc, *args, **kwargs):
     logging.info(f"Connected to MQTT broker with result code {rc}")
     if rc == 0:
         # 从 userdata 获取配置
-        config = userdata
+        config = userdata['config']
         client.subscribe(config['MQTT_TOPIC_PUBLISH'], qos=config['QOS_LEVEL'])
         logging.info(f"Subscribed to topic: {config['MQTT_TOPIC_PUBLISH']} with QoS {config['QOS_LEVEL']}")
     else:
@@ -27,54 +28,12 @@ def on_connect(client, userdata, flags, rc, *args, **kwargs):
 def on_message(client, userdata, msg):
     """MQTT 消息回调函数"""
     logging.info(f"Received message on topic {msg.topic}: {msg.payload.decode()}")
-    
     try:
-        # 解析消息内容
-        payload = msg.payload.decode('utf-8')
-        logging.info(f"Received message: {payload}")
-        
-        # 尝试解析为JSON
-        try:
-            data = json.loads(payload)
-            download_url = data.get('download_url')
-        except json.JSONDecodeError:
-            # 如果不是JSON，尝试直接提取URL
-            download_url = extract_url_from_text(payload)
-        
-        if not download_url:
-            logging.warning("No valid URL found in the message")
-            return
-        
-        if not is_valid_mp4_url(download_url):
-            logging.warning(f"Invalid MP4 URL: {download_url}")
-            return
-            
-        logging.info(f"Download URL: {download_url}")
-
-        # 从 userdata 获取配置
-        config = userdata
-        # 下载视频
-        download_video(download_url, config)
-            
+        # Add message to the queue
+        userdata['message_queue'].put((msg, time.time()))
+        logging.info(f"Message queued for processing: {msg.payload.decode()}")
     except Exception as e:
-        logging.error(f"Error processing message: {str(e)}")
-
-def extract_url_from_text(text):
-    """从文本中提取URL"""
-    # 简单的URL正则匹配
-    url_pattern = re.compile(
-        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    )
-    match = url_pattern.search(text)
-    return match.group(0) if match else None
-
-def is_valid_mp4_url(url):
-    """验证URL是否为有效的 MP4 URL"""
-    try:
-        url_obj = urlparse(url)
-        return all([url_obj.scheme, url_obj.netloc]) and url_obj.path.endswith('.mp4')
-    except ValueError:
-        return False
+        logging.error(f"Error queuing message: {str(e)}")
 
 def download_video(download_url, config):
     """
@@ -148,6 +107,53 @@ def download_video_cmd(download_url, config):
         logging.error(f"Error downloading video: {str(e)}")
         return None
     
+def process_message(client, config, msg, receive_time):
+    """Process a single MQTT message."""
+    try:
+        payload = msg.payload.decode('utf-8')
+        logging.info(f"Processing message: {payload}")
+
+        # 尝试解析为JSON
+        try:
+            data = json.loads(payload)
+            download_url = data.get('download_url')
+        except json.JSONDecodeError:
+            # 如果不是JSON，尝试直接提取URL
+            download_url = extract_url_from_text(payload)
+        
+        if not download_url:
+            logging.warning("No valid URL found in the message")
+            return
+        
+        if not is_valid_mp4_url(download_url):
+            logging.warning(f"Invalid MP4 URL: {download_url}")
+            return
+            
+        logging.info(f"Download URL: {download_url}")
+
+        # 下载视频
+        download_video(download_url, config)
+            
+    except Exception as e:
+        logging.error(f"Error processing message: {str(e)}")        
+
+def message_processor(client, userdata, stop_event):
+    """Worker thread to process messages from the queue sequentially."""
+    message_queue = userdata['message_queue']
+    config = userdata['config']
+    
+    while not stop_event.is_set():
+        try:
+            # Get message from queue (block until a message is available or timeout)
+            msg, receive_time = message_queue.get(timeout=1.0)
+            logging.info("Dequeued message for processing")
+            process_message(client, config, msg, receive_time)
+            message_queue.task_done()
+        except queue.Empty:
+            continue
+        except Exception as e:
+            logging.error(f"Error in message processor: {str(e)}")
+
 def on_log(client, userdata, paho_log_level, messages):
     if paho_log_level == mqtt.LogLevel.MQTT_LOG_ERR:
         print(messages)
@@ -186,11 +192,10 @@ def main():
     #     os.makedirs(DOWNLOAD_DIR)    
 
     # 设置日志    
-    setup_logging("puller")
+    setup_logging(service_name)
 
     # 这里添加你的 MQTT 客户端逻辑
-    print()
-    print("Configuration loaded:")
+    print("::Configuration loaded::")
     print(f"MQTT Broker: {MQTT_BROKER}:{MQTT_PORT}")
     print(f"QoS Level: {QOS_LEVEL}")
     print(f"Subscribe Topic: {MQTT_TOPIC_PUBLISH}")
@@ -210,11 +215,21 @@ def main():
     config['MQTT_USERNAME'] = MQTT_USERNAME
     config['MQTT_PASSWORD'] = MQTT_PASSWORD
 
+    # Create message queue and stop event
+    message_queue = queue.Queue()
+    stop_event = threading.Event()
+
+    # Prepare userdata
+    userdata = {
+        'config': config,
+        'message_queue': message_queue
+    }    
+
     # 创建MQTT客户端
-    mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=MQTT_CLIENT_ID, userdata=config)
+    mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=MQTT_CLIENT_ID, userdata=userdata)
     mqttc.reconnect_delay_set(min_delay=1, max_delay=120)
 
-# 设置用户名和密码
+    # 设置用户名和密码
     if MQTT_USERNAME and MQTT_PASSWORD:
         mqttc.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
         logging.info(f"Using MQTT authentication: username={MQTT_USERNAME}")
@@ -223,17 +238,32 @@ def main():
     mqttc.on_connect = on_connect
     mqttc.on_message = on_message    
 
+    # Start message processor thread
+    processor_thread = threading.Thread(
+        target=message_processor,
+        args=(mqttc, userdata, stop_event),
+        daemon=True
+    )
+    processor_thread.start()    
+
     try:
         mqttc.connect(MQTT_BROKER, MQTT_PORT, keepalive=KEEPALIVE)  # 增加 keepalive
         logging.info(f"Connecting to MQTT broker: {MQTT_BROKER}:{MQTT_PORT}")
         mqttc.loop_start()  # 在后台线程运行 MQTT 循环
         while True:
             time.sleep(1)  # 主线程保持运行
+    except KeyboardInterrupt:
+        logging.info("Received shutdown signal, stopping...")
+        stop_event.set()  # Signal the processor thread to stop            
     except Exception as e:
         logging.error(f"Failed to connect or run MQTT client: {e}")
         raise
     finally:
-        mqttc.loop_stop()  # 停止后台循环 
+        stop_event.set()  # Ensure processor thread stops
+        mqttc.loop_stop()  # Stop MQTT loop
+        mqttc.disconnect()  # Disconnect MQTT client
+        processor_thread.join()  # Wait for processor thread to finish
+        logging.info("MQTT client stopped.")
 
 if __name__ == "__main__":
     print("Starting MQTT video puller client...")
